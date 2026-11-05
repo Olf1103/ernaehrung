@@ -1,4 +1,4 @@
-const MODEL = 'gemini-2.5-flash';
+const MODEL = 'gemini-3.8-flash';
 const LS = { meals: 'ern.meals', key: 'ern.geminiKey', goals: 'ern.goals' };
 const PROMPT = `Du analysierst ein Foto einer Mahlzeit. Erkenne jedes sichtbare Lebensmittel, schätze die Menge in Gramm und die Nährwerte (kcal, Eiweiß, Kohlenhydrate, Fett in Gramm) für genau diese Menge. Antworte ausschließlich mit JSON. Wenn etwas unklar ist, schätze eher konservativ und vermerke die Unsicherheit im Namen.`;
 
