@@ -32,15 +32,17 @@ const ADVICE_SCHEMA = {
       items: {
         type: 'OBJECT',
         properties: {
+          slot: { type: 'STRING', enum: ['Frühstück', 'Mittagessen', 'Abendessen', 'Snack'] },
           time: { type: 'STRING' }, title: { type: 'STRING' }, description: { type: 'STRING' },
           kcal: { type: 'NUMBER' }, protein: { type: 'NUMBER' }, carbs: { type: 'NUMBER' }, fat: { type: 'NUMBER' }
         },
-        required: ['time', 'title', 'description', 'kcal', 'protein', 'carbs', 'fat']
+        required: ['slot', 'time', 'title', 'description', 'kcal', 'protein', 'carbs', 'fat']
       }
     },
+    shoppingList: { type: 'ARRAY', items: { type: 'STRING' } },
     tips: { type: 'ARRAY', items: { type: 'STRING' } }
   },
-  required: ['summary', 'meals', 'tips']
+  required: ['summary', 'meals', 'shoppingList', 'tips']
 };
 
 const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
@@ -78,7 +80,7 @@ function adviceContext() {
   const meals = todaysMeals();
   const { targets, custom } = currentTargets();
   const prefs = load(LS.prefs, DEFAULT_PREFS);
-  const key = `${today()}|${meals.map(m => m.id).join(',')}|${prefs}|${JSON.stringify(targets)}`;
+  const key = `v2|${today()}|${meals.map(m => m.id).join(',')}|${prefs}|${JSON.stringify(targets)}`;
   return { meals, targets, custom, prefs, key };
 }
 
@@ -182,22 +184,47 @@ Bereits heute gegessen: ${foodList}.
 Noch offen: ${open.kcal} kcal, ${open.protein} g Eiweiß, ${open.carbs} g Kohlenhydrate, ${open.fat} g Fett.
 Wünsche und Vorlieben der Person: ${prefs || 'keine angegeben'}.
 Aufgabe: ${task}
-Antworte auf Deutsch und ausschließlich als JSON nach dem vorgegebenen Schema. Jede Mahlzeit bekommt eine Uhrzeit, einen kurzen Titel, eine kurze Beschreibung und die geschätzten Nährwerte.`;
+Antworte auf Deutsch und ausschließlich als JSON nach dem vorgegebenen Schema. Jede Mahlzeit bekommt eine Zuordnung (slot: Frühstück, Mittagessen, Abendessen oder Snack), eine Uhrzeit, einen kurzen Titel, eine kurze Beschreibung und die geschätzten Nährwerte.
+Zusätzlich erstellst du eine Einkaufsliste (shoppingList) mit allen Zutaten der vorgeschlagenen Mahlzeiten. Gleiche Zutaten fasst du zusammen. Jeder Eintrag steht in einer eigenen Zeile mit Menge und Zutat, z. B. "500 g Hähnchenbrust" oder "1 Bund Blattspinat". Die Vorräte der Person sind unbekannt, also listest du alles auf, außer Dinge, die bereits gegessen wurden.`;
 }
 
+const SLOTS = ['Frühstück', 'Mittagessen', 'Abendessen', 'Snack'];
+
 function renderAdvice(d) {
-  return `
-    <p>${esc(d.summary)}</p>
-    ${(d.meals || []).map(m => `
+  const meals = d.meals || [];
+  const slotOf = (m) => (SLOTS.includes(m.slot) ? m.slot : 'Snack');
+  const groups = SLOTS.map(slot => {
+    const list = meals.filter(m => slotOf(m) === slot);
+    if (!list.length) return '';
+    return `<h3 class="slot">${slot}</h3>` + list.map(m => `
       <div class="card">
         <div class="grow">
           <strong>${esc(m.time)} · ${esc(m.title)}</strong>
           <div class="muted">${esc(m.description)}</div>
           <div class="muted">${Math.round(m.kcal || 0)} kcal · E ${round(m.protein || 0)} g · KH ${round(m.carbs || 0)} g · F ${round(m.fat || 0)} g</div>
         </div>
-      </div>`).join('')}
-    ${d.tips?.length ? `<ul>${d.tips.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : ''}
+      </div>`).join('');
+  }).join('');
+
+  const shop = (d.shoppingList || []).filter(Boolean);
+  const shopBox = shop.length ? `
+    <h2>Einkaufsliste</h2>
+    <ul class="shop">${shop.map(i => `<li>${esc(i)}</li>`).join('')}</ul>
+    <button id="copyShop">In die Zwischenablage kopieren</button>
+    ${navigator.share ? '<button id="shareShop" class="secondary">Teilen</button>' : ''}
+    <p class="muted">Dann in Bring! einfügen: Die Einträge stehen je in einer eigenen Zeile.</p>` : '';
+
+  return `
+    <p>${esc(d.summary)}</p>
+    ${groups}
+    ${shopBox}
+    ${d.tips?.length ? `<h2>Tipps</h2><ul>${d.tips.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : ''}
     <p class="muted">Schätzungen, keine medizinische Beratung.</p>`;
+}
+
+function shopText() {
+  const d = load(LS.advice, null)?.data;
+  return (d?.shoppingList || []).filter(Boolean).join('\n');
 }
 
 /* ---------- Neue Mahlzeit ---------- */
@@ -370,7 +397,7 @@ function viewSettings() {
 }
 
 /* ---------- Globale Ereignisse ---------- */
-document.addEventListener('click', (e) => {
+document.addEventListener('click', async (e) => {
   const t = e.target;
   if (t.dataset?.del && confirm('Mahlzeit löschen?')) {
     save(LS.meals, load(LS.meals, []).filter(m => m.id !== t.dataset.del));
@@ -379,6 +406,18 @@ document.addEventListener('click', (e) => {
   if (t.dataset?.rm !== undefined) {
     draft.items.splice(+t.dataset.rm, 1);
     render();
+  }
+  if (t.id === 'copyShop') {
+    const text = shopText();
+    try {
+      await navigator.clipboard.writeText(text);
+      t.textContent = 'Kopiert ✓';
+    } catch {
+      alert('Kopieren nicht möglich. Bitte die Liste markieren und kopieren:\n\n' + text);
+    }
+  }
+  if (t.id === 'shareShop') {
+    navigator.share({ title: 'Einkaufsliste', text: shopText() }).catch(() => {});
   }
   if (t.dataset?.refresh) {
     save(LS.advice, null);
