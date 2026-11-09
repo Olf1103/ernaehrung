@@ -489,7 +489,9 @@ const RECIPE_RULES = `Regeln für Rezepte:
 - Einfach und schnell: höchstens etwa 20 Minuten aktive Zeit, wenige Zutaten, Alltagsküche, keine aufwendigen Techniken. prepMinutes ist die Gesamtzeit in Minuten.
 - Rezepte für 1 Person (servings: 1).
 - Jede Zutat beginnt mit einer Menge in Zahlen, z. B. "150 g Haferflocken" oder "2 Eier", damit die Mengen umgerechnet werden können.
-- Jede Mahlzeit bekommt zusätzlich eine vegetarische Alternative (vegetarian) mit eigenem Rezept und Nährwerten. Ist die Hauptmahlzeit schon vegetarisch, gib eine andere vegetarische Variante an.`;
+- Jede Mahlzeit bekommt zusätzlich eine vegetarische Alternative (vegetarian) mit eigenem Rezept und Nährwerten. Ist die Hauptmahlzeit schon vegetarisch, gib eine andere vegetarische Variante an.
+- Abendessen: Das Hauptgericht ist immer vegetarisch. Die vegetarische Alternative ist dann eine andere vegetarische Variante.
+- Frühstück und Mittagessen sind vorbereitbar: Sie werden für 2 bis 3 Tage auf einmal gekocht und im Kühlschrank aufbewahrt. In der Firma steht eine Mikrowelle zum Aufwärmen bereit, die Gerichte dürfen also warm gegessen werden. Sie lassen sich gut in einer Dose transportieren.`;
 
 function advicePrompt({ meals, targets, custom, prefs }) {
   const items = meals.flatMap(m => m.items);
