@@ -530,7 +530,8 @@ Wünsche und Vorlieben der Person: ${prefs || 'keine angegeben'}.
 
 ${RECIPE_RULES}
 - Pro Tag Frühstück, Mittagessen und Abendessen. Einen Snack nur dort, wo der Tagesablauf es nahelegt.
-- Abwechslung: Kein Gericht mehr als einmal in der Woche.
+- Wenig Einkauf: Die ganze Woche nutzt nur einen kleinen Kreis an Zutaten (etwa 8 bis 10 Hauptzutaten). Verwende bevorzugt diese, sofern sie zu den Wünschen passen: Hähnchenbrust, Hackfleisch, Vollkornnudeln, Reis, Haferflocken, Magerquark, Eier, Naturjoghurt, Brokkoli, Zucchini, Paprika, Bananen. Dieselbe Zutat in gleicher Menge darf in mehreren Gerichten vorkommen, z. B. Reis mittags und abends. Vermeide Zutaten, die nur in einem einzigen Gericht vorkommen.
+- Abwechslung trotzdem: Gerichte, Gewürze und Zubereitung wechseln. Kein Gericht mehr als einmal in der Woche.
 - Zeitsparen: Plane Mittagessen so, dass sie für mehrere Tage vorbereitet werden können.
 - Jede Mahlzeit bekommt eine Zuordnung (slot), eine Uhrzeit, einen kurzen Titel und eine kurze Beschreibung.
 - Die Einkaufsliste (shoppingList) gilt für 1 Person und fasst die Zutaten der ganzen Woche zusammen (Hauptmahlzeiten und vegetarische Alternativen). Gleiche Zutaten zusammenfassen, Mengen addieren, eine Zeile pro Eintrag mit Menge.
@@ -690,7 +691,7 @@ async function swapMeal(d, i) {
   render();
   try {
     const titles = week.days.flatMap(x => x.meals.map(m => m.title)).join('; ');
-    const prompt = `Ersetze in einem Wochenplan eine Mahlzeit. Tag: ${week.days[d].name}. Slot: ${old.slot}. Uhrzeit: ${old.time}. Das bisherige Gericht "${old.title}" gefällt nicht. Schlage ein anderes Gericht vor, das nicht in dieser Liste steht: ${titles}.
+    const prompt = `Ersetze in einem Wochenplan eine Mahlzeit. Tag: ${week.days[d].name}. Slot: ${old.slot}. Uhrzeit: ${old.time}. Das bisherige Gericht "${old.title}" gefällt nicht. Schlage ein anderes Gericht vor, das nicht in dieser Liste steht: ${titles}. Nutze möglichst Zutaten, die in der Woche schon vorkommen, damit weniger eingekauft werden muss.
 ${RECIPE_RULES}
 Wünsche und Vorlieben der Person: ${load(LS.prefs, DEFAULT_PREFS)}.
 Antworte auf Deutsch und ausschließlich als JSON nach dem vorgegebenen Schema.`;
