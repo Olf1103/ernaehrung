@@ -191,13 +191,15 @@ let portions = {};      // Personenzahl je Rezept, nur im Speicher
 let weekBusy = false;
 let weekStatus = '';
 let weekError = '';
+let weekDay = null; // ausgewählter Wochentag (0 = Montag)
 const openRecipes = new Set();
 
 /* ---------- Routing ---------- */
 function render() {
-  const route = (location.hash || '#heute').slice(1);
-  document.querySelectorAll('nav a').forEach(a => a.classList.toggle('on', a.getAttribute('href') === '#' + route));
-  ({ heute: viewToday, woche: viewWeek, neu: viewNew, einstellungen: viewSettings }[route] || viewToday)();
+  const route = (location.hash || '#uebersicht').slice(1);
+  const page = route === 'heute' ? 'uebersicht' : route;
+  document.querySelectorAll('nav a').forEach(a => a.classList.toggle('on', a.getAttribute('href') === '#' + page));
+  ({ uebersicht: viewOverview, woche: viewWeek, neu: viewNew, einstellungen: viewSettings }[page] || viewOverview)();
 }
 
 /* ---------- Gemeinsame Bausteine ---------- */
@@ -209,8 +211,48 @@ function scaleText(s, f) {
   });
 }
 
+const UNIT_ALIAS = { g: 'g', gramm: 'g', kg: 'kg', ml: 'ml', l: 'l', el: 'EL', tl: 'TL', stk: 'Stk', 'stück': 'Stk', dose: 'Dose', dosen: 'Dose', bund: 'Bund', becher: 'Becher', scheibe: 'Scheibe', scheiben: 'Scheibe', zehe: 'Zehe', zehen: 'Zehe', prise: 'Prise', prisen: 'Prise', packung: 'Packung', pck: 'Packung', pk: 'Packung' };
+const fmtNum = (n) => (Math.round(n * 10) / 10).toString().replace('.', ',');
+
+// Fasst gleiche Zutaten zusammen, z. B. "100 g Reis" + "200 g Reis" → "300 g Reis"
+function mergeShopping(list) {
+  const groups = new Map();
+  for (const raw of list || []) {
+    const line = String(raw ?? '').trim().replace(/\s+/g, ' ');
+    if (!line) continue;
+    const m = line.match(/^(\d+(?:[.,]\d+)?)\s*(.*)$/);
+    const amount = m ? parseFloat(m[1].replace(',', '.')) : null;
+    let rest = m ? m[2] : line;
+    let unit = '';
+    const u = rest.match(/^([a-zA-ZäöüÄÖÜ]+\.?)\s+(.+)$/);
+    if (amount !== null && u && (u[1].toLowerCase().replace(/\.$/, '') in UNIT_ALIAS)) {
+      unit = u[1].toLowerCase().replace(/\.$/, '');
+      rest = u[2];
+    }
+    const name = rest.replace(/,\s*$/, '').trim();
+    if (!name) continue;
+
+    const conv = { g: ['g', 1], kg: ['g', 1000], ml: ['ml', 1], l: ['ml', 1000] }[unit];
+    let unitKey, value;
+    if (conv) { unitKey = conv[0]; value = amount === null ? null : amount * conv[1]; }
+    else { unitKey = unit ? UNIT_ALIAS[unit] : ''; value = amount; }
+
+    const key = unitKey + '|' + name.toLowerCase();
+    const g = groups.get(key) || { unitKey, name, total: 0, hasAmount: false };
+    if (value !== null) { g.total += value; g.hasAmount = true; }
+    groups.set(key, g);
+  }
+  return [...groups.values()].map(g => {
+    if (!g.hasAmount) return g.name;
+    let total = g.total, unit = g.unitKey;
+    if (unit === 'g' && total >= 1000) { total /= 1000; unit = 'kg'; }
+    if (unit === 'ml' && total >= 1000) { total /= 1000; unit = 'l'; }
+    return `${fmtNum(total)}${unit ? ' ' + unit : ''} ${g.name}`;
+  });
+}
+
 function shopBox(list) {
-  const items = (list || []).filter(Boolean);
+  const items = mergeShopping(list);
   if (!items.length) return '';
   const p = shopPersons();
   return `
@@ -280,7 +322,7 @@ function adviceContext() {
   return { meals, targets, custom, prefs, key };
 }
 
-function viewToday() {
+function viewOverview() {
   const meals = todaysMeals();
   const total = (k) => meals.reduce((a, m) => a + sumItems(m.items, k), 0);
   const goals = load(LS.goals, {});
@@ -294,7 +336,7 @@ function viewToday() {
     </div>`;
   };
   $('#app').innerHTML = `
-    <h1>Heute</h1>
+    <h1>Übersicht</h1>
     ${bar('Kalorien', 'kcal', 'kcal')}
     ${bar('Eiweiß', 'protein', 'g')}
     ${bar('Kohlenhydrate', 'carbs', 'g')}
@@ -310,7 +352,7 @@ function viewToday() {
         </div>
         <button class="ghost" data-del="${m.id}">×</button>
       </div>`).join('') : '<p class="muted">Noch keine Mahlzeiten heute.</p>'}
-    <h2>${meals.length ? 'Empfehlung für den Rest des Tages' : 'Essensplan für heute'}</h2>
+    <h2>Nächste Mahlzeit</h2>
     <p class="muted">${custom ? 'Basierend auf deinen Zielen.' : 'Ohne eigene Ziele rechne ich mit Richtwerten. Du kannst sie unter Einstellungen festlegen.'}</p>
     <div id="advice">${adviceBox()}</div>
   `;
@@ -488,19 +530,31 @@ function mealCard(m, i) {
     </div>`;
 }
 
+// Index der nächsten Mahlzeit (ab 30 Min. vor der Uhrzeit gilt sie noch als „nächste“)
+function nextMealIndex(meals) {
+  const d = new Date();
+  const nowMin = d.getHours() * 60 + d.getMinutes() - 30;
+  return meals.findIndex(m => {
+    const t = String(m.time || '').match(/(\d{1,2})[:.](\d{2})/);
+    return t && (+t[1]) * 60 + (+t[2]) >= nowMin;
+  });
+}
+
 function renderAdvice(d) {
   const meals = d.meals || [];
-  const groups = SLOTS.map(slot => {
-    const list = meals.map((m, i) => ({ m, i })).filter(({ m }) => slotOf(m) === slot);
-    if (!list.length) return '';
-    return `<h3 class="slot">${slot}</h3>` + list.map(({ m, i }) => mealCard(m, i)).join('');
-  }).join('');
+  if (!meals.length) return '<p class="muted">Keine Empfehlung vorhanden.</p>';
+  const next = nextMealIndex(meals);
+  const later = next === -1 ? [] : meals.map((m, i) => ({ m, i })).filter(({ i }) => i > next);
+  const main = next === -1
+    ? '<p class="muted">Für heute sind keine weiteren Mahlzeiten geplant.</p>'
+    : mealCard(meals[next], next);
 
   return `
-    <p>${esc(d.summary)}</p>
-    ${groups}
-    ${shopBox(d.shoppingList)}
-    ${d.tips?.length ? `<h2>Tipps</h2><ul>${d.tips.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : ''}
+    <p class="muted">${esc(d.summary)}</p>
+    ${main}
+    ${later.length ? `<h3 class="slot">Danach heute</h3><ul>${later.map(({ m }) => `<li>${esc(m.time)} · ${esc(m.slot)}: ${esc(m.title)}</li>`).join('')}</ul>` : ''}
+    <details style="margin-top:12px"><summary>Einkaufsliste für heute</summary>${shopBox(d.shoppingList)}</details>
+    ${d.tips?.length ? `<details style="margin-top:12px"><summary>Tipps</summary><ul>${d.tips.map(t => `<li>${esc(t)}</li>`).join('')}</ul></details>` : ''}
     <p class="muted">Schätzungen, keine medizinische Beratung.</p>`;
 }
 
@@ -532,7 +586,7 @@ function viewWeek() {
       <p class="muted">Noch kein Wochenplan für diese Woche.</p>
       <button id="createWeek">Wochenplan erstellen</button>`;
   } else {
-    body = weekDays(current) + shopBox(current.shoppingList) +
+    body = weekDays(current) + '<details style="margin-top:12px"><summary>Einkaufsliste der ganzen Woche</summary>' + shopBox(current.shoppingList) + '</details>' +
       (weekError ? `<p class="muted">${esc(weekError)}</p>` : '') +
       `<button class="secondary" id="createWeek">Neuen Wochenplan erstellen</button>`;
   }
@@ -542,15 +596,18 @@ function viewWeek() {
     ${body}`;
 }
 
+// Zeigt immer nur einen Tag, umschaltbar über die Tabs Mo–So
 function weekDays(week) {
-  return week.days.map((day, d) => {
-    const meals = (day.meals || [])
-      .map((m, i) => ({ m, i }))
-      .sort((a, b) => SLOTS.indexOf(a.m.slot) - SLOTS.indexOf(b.m.slot));
-    return `
-      <h2>${day.name} <span class="muted">${dateLabel(week.weekKey, d)}</span></h2>
-      ${meals.length ? meals.map(({ m, i }) => weekMealCard(m, d, i)).join('') : '<p class="muted">Kein Plan für diesen Tag.</p>'}`;
-  }).join('');
+  const d = weekDay ?? ((new Date().getDay() + 6) % 7);
+  const day = week.days[d] || { name: WEEK_ORDER[d], meals: [] };
+  const meals = (day.meals || [])
+    .map((m, i) => ({ m, i }))
+    .sort((a, b) => SLOTS.indexOf(a.m.slot) - SLOTS.indexOf(b.m.slot));
+  const tabs = `<div style="display:flex;gap:4px;margin:12px 0">${WEEK_ORDER.map((n, k) =>
+    `<button data-wday="${k}" class="${k === d ? '' : 'secondary'}" style="flex:1;margin:0;padding:8px 0;font-size:14px">${n.slice(0, 2)}</button>`).join('')}</div>`;
+  return `${tabs}
+    <h2>${day.name} <span class="muted">${dateLabel(week.weekKey, d)}</span></h2>
+    ${meals.length ? meals.map(({ m, i }) => weekMealCard(m, d, i)).join('') : '<p class="muted">Kein Plan für diesen Tag.</p>'}`;
 }
 
 function weekMealCard(m, d, i) {
@@ -706,7 +763,7 @@ function saveMeal() {
   meals.push({ id: crypto.randomUUID(), date: today(), at: Date.now(), items: draft.items, thumb: draft.thumb });
   save(LS.meals, meals);
   draft = { items: [], image: null, thumb: null, hint: '' };
-  location.hash = '#heute';
+  location.hash = '#uebersicht';
   render();
 }
 
@@ -853,6 +910,7 @@ document.addEventListener('click', async (e) => {
     refreshAdviceView();
   }
   if (t.dataset?.aswap !== undefined) swapAdviceMeal(+t.dataset.aswap);
+  if (t.dataset?.wday !== undefined) { weekDay = +t.dataset.wday; render(); }
   if (t.id === 'createWeek') createWeek();
   if (t.dataset?.swap) {
     const [d, i] = t.dataset.swap.split('-').map(Number);
