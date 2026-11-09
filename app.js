@@ -1,5 +1,6 @@
 const MODEL = 'gemini-3.8-flash';
-const LS = { meals: 'ern.meals', key: 'ern.geminiKey', goals: 'ern.goals', prefs: 'ern.prefs', advice: 'ern.advice', week: 'ern.week', shopPersons: 'ern.shopPersons' };
+const LS = { meals: 'ern.meals', key: 'ern.geminiKey', goals: 'ern.goals', prefs: 'ern.prefs', advice: 'ern.advice', week: 'ern.week', shopPersons: 'ern.shopPersons', sync: 'ern.sync', localUpdated: 'ern.localUpdated' };
+const SYNC_KEYS = [LS.meals, LS.goals, LS.prefs, LS.week, LS.shopPersons];
 const DEFAULT_PREFS = 'Spielt privat Fußball. Möchte zu Hause etwas Sport machen.';
 const DEFAULT_TARGETS = { kcal: 2200, protein: 120, carbs: 250, fat: 70 };
 const WEEKDAYS = ['Sonntag', 'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag'];
@@ -79,13 +80,107 @@ const SHOP_SCHEMA = {
 };
 
 const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
-const save = (k, v) => localStorage.setItem(k, JSON.stringify(v));
+const save = (k, v) => {
+  localStorage.setItem(k, JSON.stringify(v));
+  if (SYNC_KEYS.includes(k)) markChanged();
+};
 const $ = (s) => document.querySelector(s);
 const today = () => new Date().toLocaleDateString('sv-SE');
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const round = (n) => Math.round(n * 10) / 10;
 const sumItems = (items, k) => items.reduce((b, i) => b + (+i[k] || 0), 0);
 const shopPersons = () => Math.max(1, +load(LS.shopPersons, 2) || 2);
+
+/* ---------- Geräte-Sync über Firestore ---------- */
+let pushTimer = null;
+
+function markChanged() {
+  localStorage.setItem(LS.localUpdated, JSON.stringify(Date.now()));
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(syncPush, 800);
+}
+
+function setSyncStatus(t) {
+  const el = $('#syncStatus');
+  if (el) el.textContent = t;
+}
+
+function syncUrl(cfg) {
+  return `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(cfg.projectId)}/databases/(default)/documents/sync/${encodeURIComponent(cfg.code)}?key=${encodeURIComponent(cfg.apiKey)}`;
+}
+
+function syncConfigured() {
+  const cfg = load(LS.sync, null);
+  return cfg?.projectId && cfg?.apiKey && cfg?.code ? cfg : null;
+}
+
+function syncPayload() {
+  return {
+    week: load(LS.week, null),
+    meals: load(LS.meals, []).map(m => ({ ...m, thumb: null })),
+    goals: load(LS.goals, {}),
+    prefs: load(LS.prefs, DEFAULT_PREFS),
+    shopPersons: load(LS.shopPersons, 2)
+  };
+}
+
+async function syncPush() {
+  const cfg = syncConfigured();
+  if (!cfg) return;
+  const updated = load(LS.localUpdated, Date.now());
+  try {
+    const res = await fetch(syncUrl(cfg), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fields: {
+          updated: { integerValue: String(updated) },
+          data: { stringValue: JSON.stringify(syncPayload()) }
+        }
+      })
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    setSyncStatus('Gespeichert ✓');
+  } catch (e) {
+    setSyncStatus('Sync fehlgeschlagen: ' + e.message);
+  }
+}
+
+// Holt den Stand von Firestore. Gibt true zurück, wenn lokale Daten ersetzt wurden.
+async function syncPull() {
+  const cfg = syncConfigured();
+  if (!cfg) return false;
+  try {
+    const res = await fetch(syncUrl(cfg));
+    if (res.status === 404) {
+      await syncPush();
+      return false;
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const doc = await res.json();
+    const remoteUpdated = +doc.fields.updated.integerValue;
+    if (remoteUpdated <= load(LS.localUpdated, 0)) return false;
+
+    const p = JSON.parse(doc.fields.data.stringValue);
+    // Lokale fotos behalten, die Cloud speichert keine Bilder
+    const thumbs = Object.fromEntries(load(LS.meals, []).filter(m => m.thumb).map(m => [m.id, m.thumb]));
+    localStorage.setItem(LS.meals, JSON.stringify((p.meals || []).map(m => ({ ...m, thumb: thumbs[m.id] ?? null }))));
+    localStorage.setItem(LS.week, JSON.stringify(p.week ?? null));
+    localStorage.setItem(LS.goals, JSON.stringify(p.goals || {}));
+    localStorage.setItem(LS.prefs, JSON.stringify(p.prefs ?? DEFAULT_PREFS));
+    localStorage.setItem(LS.shopPersons, JSON.stringify(p.shopPersons ?? 2));
+    localStorage.setItem(LS.localUpdated, JSON.stringify(remoteUpdated));
+    setSyncStatus('Aktualisiert');
+    return true;
+  } catch (e) {
+    setSyncStatus('Sync fehlgeschlagen: ' + e.message);
+    return false;
+  }
+}
+
+function pullAndRender() {
+  syncPull().then(changed => { if (changed) render(); });
+}
 
 let draft = { items: [], image: null, thumb: null, hint: '' };
 let adviceBusy = false;
@@ -650,6 +745,14 @@ function viewSettings() {
       ${['kcal', 'protein', 'carbs', 'fat'].map(k => `<label>${k}<input type="number" data-goal="${k}" value="${goals[k] ?? ''}"></label>`).join('')}
     </div>
     <button id="saveGoals">Ziele speichern</button>
+    <h2>Geräte-Sync</h2>
+    <p class="muted">Alle Geräte mit denselben Angaben sehen denselben Plan. Projekt-ID und Web-API-Schlüssel aus Firebase, den Sync-Code kannst du neu erzeugen.</p>
+    <input id="syncPid" placeholder="Firebase Projekt-ID" value="${esc(syncConfigured()?.projectId ?? load(LS.sync, {})?.projectId ?? '')}">
+    <input id="syncApi" placeholder="Web-API-Schlüssel" value="${esc(load(LS.sync, {})?.apiKey ?? '')}">
+    <input id="syncCode" placeholder="Sync-Code" value="${esc(load(LS.sync, {})?.code ?? '')}">
+    <button id="genCode" class="secondary">Neuen Sync-Code erzeugen</button>
+    <button id="saveSync">Speichern und synchronisieren</button>
+    <p id="syncStatus" class="muted"></p>
     <h2>Daten</h2>
     <button id="exp">Backup exportieren</button>
     <label class="file"><input type="file" id="imp" accept="application/json"><span>Backup importieren</span></label>
@@ -657,6 +760,21 @@ function viewSettings() {
   $('#saveKey').onclick = () => {
     localStorage.setItem(LS.key, $('#apikey').value.trim());
     alert('Gespeichert.');
+  };
+  $('#genCode').onclick = () => {
+    const bytes = crypto.getRandomValues(new Uint8Array(24));
+    $('#syncCode').value = Array.from(bytes, b => b.toString(36).padStart(2, '0')).join('').slice(0, 32);
+  };
+  $('#saveSync').onclick = async () => {
+    save(LS.sync, {
+      projectId: $('#syncPid').value.trim(),
+      apiKey: $('#syncApi').value.trim(),
+      code: $('#syncCode').value.trim()
+    });
+    if (!syncConfigured()) return setSyncStatus('Bitte Projekt-ID, Web-API-Schlüssel und Sync-Code ausfüllen.');
+    setSyncStatus('Synchronisiere …');
+    await syncPull();
+    await syncPush();
   };
   $('#savePrefs').onclick = () => {
     save(LS.prefs, $('#prefs').value.trim());
@@ -759,6 +877,8 @@ document.addEventListener('input', (e) => {
 });
 
 window.addEventListener('hashchange', render);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) pullAndRender(); });
 render();
+pullAndRender();
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
