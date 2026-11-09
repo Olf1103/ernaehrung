@@ -211,22 +211,10 @@ async function main() {
   const prefs = p.prefs ?? DEFAULT_PREFS;
   const routine = `Heute ist ${WEEKDAYS[wd]}. Es ist jetzt ${clock} Uhr. Plane nur Zeiten, die noch nicht vorbei sind.\n${dayRoutine(wd)}`;
 
-  // Tagesplan: gleicher Schlüssel wie in der App, damit die App ihn sofort erkennt
-  const key = `v4|${today}|${meals.map(m => m.id).join(',')}|${prefs}|${JSON.stringify(targets)}`;
-  if (FORCE || p.advice?.key !== key) {
-    console.log('Erstelle Tagesplan …');
-    const data = await gemini(advicePrompt({ meals, targets, custom, prefs, routine }), ADVICE_SCHEMA);
-    p.advice = { key, data };
-  } else {
-    console.log('Tagesplan ist schon aktuell.');
-  }
+  // Der Tagesplan kommt nach dem Wochenplan, siehe unten
 
-  // Tagesplan sofort speichern, damit er auch bei einem Fehler im Wochenplan bleibt
-  await writePayload(p);
-  console.log('Tagesplan gespeichert.');
-
-  // Wochenplan nur montags, wenn für diese Woche noch keiner existiert
-  if (wd === 1 && (p.week?.weekKey !== weekKey || FORCE)) {
+  // Wochenplan, wenn für diese Woche noch keiner existiert
+  if (p.week?.weekKey !== weekKey || FORCE) {
     try {
       console.log('Erstelle Wochenplan in zwei Teilen …');
       const part = async (idx) => {
@@ -243,6 +231,21 @@ async function main() {
       console.error('Wochenplan fehlgeschlagen, der Tagesplan ist trotzdem gespeichert:', e.message);
     }
   }
+  // Tagesplan: Gibt es für heute schon Gerichte im Wochenplan, werden genau die übernommen
+  const dayWeek = p.week?.weekKey === weekKey ? p.week.days?.[(wd + 6) % 7] : null;
+  const key = `v4|${today}|${meals.map(m => m.id).join(',')}|${prefs}|${JSON.stringify(targets)}`;
+  if (!meals.length && dayWeek?.meals?.length) {
+    p.advice = { key, data: { summary: 'Plan aus dem Wochenplan für heute.', meals: dayWeek.meals, shoppingList: [], tips: [] } };
+    console.log('Tagesplan aus dem Wochenplan übernommen.');
+  } else if (FORCE || p.advice?.key !== key) {
+    console.log('Erstelle Tagesplan …');
+    const data = await gemini(advicePrompt({ meals, targets, custom, prefs, routine }), ADVICE_SCHEMA);
+    p.advice = { key, data };
+  } else {
+    console.log('Tagesplan ist schon aktuell.');
+  }
+  await writePayload(p);
+  console.log('Tagesplan gespeichert.');
   console.log('Fertig.');
 }
 
