@@ -1,7 +1,11 @@
 const MODEL = 'gemini-3.8-flash';
-const LS = { meals: 'ern.meals', key: 'ern.geminiKey', goals: 'ern.goals', prefs: 'ern.prefs', advice: 'ern.advice' };
+const LS = { meals: 'ern.meals', key: 'ern.geminiKey', goals: 'ern.goals', prefs: 'ern.prefs', advice: 'ern.advice', week: 'ern.week', shopPersons: 'ern.shopPersons' };
 const DEFAULT_PREFS = 'Spielt privat Fußball. Möchte zu Hause etwas Sport machen.';
 const DEFAULT_TARGETS = { kcal: 2200, protein: 120, carbs: 250, fat: 70 };
+const WEEKDAYS = ['Sonntag', 'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag'];
+const WEEK_ORDER = ['Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag', 'Sonntag'];
+const WEEK_GETDAY = [1, 2, 3, 4, 5, 6, 0];
+const SLOTS = ['Frühstück', 'Mittagessen', 'Abendessen', 'Snack'];
 
 const PROMPT = `Du analysierst ein Foto einer Mahlzeit. Erkenne jedes sichtbare Lebensmittel, schätze die Menge in Gramm und die Nährwerte (kcal, Eiweiß, Kohlenhydrate, Fett in Gramm) für genau diese Menge. Antworte ausschließlich mit JSON. Wenn etwas unklar ist, schätze eher konservativ und vermerke die Unsicherheit im Namen.`;
 
@@ -23,26 +27,55 @@ const MEAL_SCHEMA = {
   required: ['items']
 };
 
+const RECIPE_PROPS = {
+  ingredients: { type: 'ARRAY', items: { type: 'STRING' } },
+  steps: { type: 'ARRAY', items: { type: 'STRING' } },
+  kcal: { type: 'NUMBER' }, protein: { type: 'NUMBER' }, carbs: { type: 'NUMBER' }, fat: { type: 'NUMBER' }
+};
+
+const MEAL_ITEM = {
+  type: 'OBJECT',
+  properties: {
+    slot: { type: 'STRING', enum: SLOTS },
+    time: { type: 'STRING' }, title: { type: 'STRING' }, description: { type: 'STRING' },
+    prepMinutes: { type: 'NUMBER' }, servings: { type: 'NUMBER' },
+    ...RECIPE_PROPS,
+    vegetarian: {
+      type: 'OBJECT',
+      properties: { title: { type: 'STRING' }, ...RECIPE_PROPS },
+      required: ['title', 'ingredients', 'steps', 'kcal', 'protein', 'carbs', 'fat']
+    }
+  },
+  required: ['slot', 'time', 'title', 'description', 'prepMinutes', 'servings', 'ingredients', 'steps', 'kcal', 'protein', 'carbs', 'fat', 'vegetarian']
+};
+
 const ADVICE_SCHEMA = {
   type: 'OBJECT',
   properties: {
     summary: { type: 'STRING' },
-    meals: {
-      type: 'ARRAY',
-      items: {
-        type: 'OBJECT',
-        properties: {
-          slot: { type: 'STRING', enum: ['Frühstück', 'Mittagessen', 'Abendessen', 'Snack'] },
-          time: { type: 'STRING' }, title: { type: 'STRING' }, description: { type: 'STRING' },
-          kcal: { type: 'NUMBER' }, protein: { type: 'NUMBER' }, carbs: { type: 'NUMBER' }, fat: { type: 'NUMBER' }
-        },
-        required: ['slot', 'time', 'title', 'description', 'kcal', 'protein', 'carbs', 'fat']
-      }
-    },
+    meals: { type: 'ARRAY', items: MEAL_ITEM },
     shoppingList: { type: 'ARRAY', items: { type: 'STRING' } },
     tips: { type: 'ARRAY', items: { type: 'STRING' } }
   },
   required: ['summary', 'meals', 'shoppingList', 'tips']
+};
+
+const WEEK_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    days: {
+      type: 'ARRAY',
+      items: { type: 'OBJECT', properties: { meals: { type: 'ARRAY', items: MEAL_ITEM } }, required: ['meals'] }
+    },
+    shoppingList: { type: 'ARRAY', items: { type: 'STRING' } }
+  },
+  required: ['days', 'shoppingList']
+};
+
+const SHOP_SCHEMA = {
+  type: 'OBJECT',
+  properties: { shoppingList: { type: 'ARRAY', items: { type: 'STRING' } } },
+  required: ['shoppingList']
 };
 
 const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
@@ -52,16 +85,82 @@ const today = () => new Date().toLocaleDateString('sv-SE');
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const round = (n) => Math.round(n * 10) / 10;
 const sumItems = (items, k) => items.reduce((b, i) => b + (+i[k] || 0), 0);
+const shopPersons = () => Math.max(1, +load(LS.shopPersons, 2) || 2);
 
 let draft = { items: [], image: null, thumb: null, hint: '' };
 let adviceBusy = false;
 let adviceError = null; // { key, msg }
+let portions = {};      // Personenzahl je Rezept, nur im Speicher
+let weekBusy = false;
+let weekStatus = '';
+let weekError = '';
+const openRecipes = new Set();
 
 /* ---------- Routing ---------- */
 function render() {
   const route = (location.hash || '#heute').slice(1);
   document.querySelectorAll('nav a').forEach(a => a.classList.toggle('on', a.getAttribute('href') === '#' + route));
-  ({ heute: viewToday, neu: viewNew, einstellungen: viewSettings }[route] || viewToday)();
+  ({ heute: viewToday, woche: viewWeek, neu: viewNew, einstellungen: viewSettings }[route] || viewToday)();
+}
+
+/* ---------- Gemeinsame Bausteine ---------- */
+function scaleText(s, f) {
+  if (f === 1) return String(s);
+  return String(s).replace(/^(\d+(?:[.,]\d+)?)/, (m) => {
+    const n = parseFloat(m.replace(',', '.')) * f;
+    return (Math.round(n * 10) / 10).toString().replace('.', ',');
+  });
+}
+
+function shopBox(list) {
+  const items = (list || []).filter(Boolean);
+  if (!items.length) return '';
+  const p = shopPersons();
+  return `
+    <h2>Einkaufsliste</h2>
+    <div style="display:flex;align-items:center;gap:10px;margin:8px 0">
+      <span class="muted">Einkauf für</span>
+      <button data-shop="-1" style="width:auto;padding:4px 14px;margin:0">−</button>
+      <strong>${p} ${p === 1 ? 'Person' : 'Personen'}</strong>
+      <button data-shop="1" style="width:auto;padding:4px 14px;margin:0">+</button>
+    </div>
+    <ul class="shop">${items.map(i => `<li>${esc(scaleText(i, p))}</li>`).join('')}</ul>
+    <button id="copyShop">In die Zwischenablage kopieren</button>
+    ${navigator.share ? '<button id="shareShop" class="secondary">Teilen</button>' : ''}
+    <p class="muted">Dann in Bring! einfügen. Jede Zeile ist ein Eintrag.</p>`;
+}
+
+function recipeBlock(r, id, base, label) {
+  const n = portions[id] ?? base;
+  const f = n / base;
+  const nut = `${Math.round((r.kcal || 0) * f)} kcal · E ${round((r.protein || 0) * f)} g · KH ${round((r.carbs || 0) * f)} g · F ${round((r.fat || 0) * f)} g`;
+  return `
+    <details class="recipe" data-rid="${id}" ${openRecipes.has(id) ? 'open' : ''}>
+      <summary>${label}</summary>
+      <div class="portion" style="display:flex;align-items:center;gap:10px;margin:8px 0">
+        <span class="muted">Personen</span>
+        <button data-port="${id}" data-d="-1" data-base="${base}" style="width:auto;padding:4px 14px;margin:0">−</button>
+        <strong>${n}</strong>
+        <button data-port="${id}" data-d="1" data-base="${base}" style="width:auto;padding:4px 14px;margin:0">+</button>
+      </div>
+      <div class="muted">${nut}</div>
+      <strong>Zutaten</strong>
+      <ul>${(r.ingredients || []).map(i => `<li>${esc(scaleText(i, f))}</li>`).join('')}</ul>
+      <strong>Zubereitung</strong>
+      <ol>${(r.steps || []).map(s => `<li>${esc(s)}</li>`).join('')}</ol>
+    </details>`;
+}
+
+function plainRecipe(r, id, label) {
+  return `
+    <details class="recipe" data-rid="${id}" ${openRecipes.has(id) ? 'open' : ''}>
+      <summary>${label}</summary>
+      <div class="muted">${Math.round(r.kcal || 0)} kcal · E ${round(r.protein || 0)} g · KH ${round(r.carbs || 0)} g · F ${round(r.fat || 0)} g</div>
+      <strong>Zutaten</strong>
+      <ul>${(r.ingredients || []).map(i => `<li>${esc(i)}</li>`).join('')}</ul>
+      <strong>Zubereitung</strong>
+      <ol>${(r.steps || []).map(s => `<li>${esc(s)}</li>`).join('')}</ol>
+    </details>`;
 }
 
 /* ---------- Heute ---------- */
@@ -80,7 +179,7 @@ function adviceContext() {
   const meals = todaysMeals();
   const { targets, custom } = currentTargets();
   const prefs = load(LS.prefs, DEFAULT_PREFS);
-  const key = `v2|${today()}|${meals.map(m => m.id).join(',')}|${prefs}|${JSON.stringify(targets)}`;
+  const key = `v4|${today()}|${meals.map(m => m.id).join(',')}|${prefs}|${JSON.stringify(targets)}`;
   return { meals, targets, custom, prefs, key };
 }
 
@@ -129,7 +228,8 @@ function adviceBox() {
   const { key } = adviceContext();
   const cache = load(LS.advice, null);
   if (cache?.key === key) {
-    return renderAdvice(cache.data) + '<button class="secondary" data-refresh="1">Neu berechnen</button>';
+    const errHtml = adviceError?.key === key ? `<p class="muted">${esc(adviceError.msg)}</p>` : '';
+    return errHtml + renderAdvice(cache.data) + '<button class="secondary" data-refresh="1">Neu berechnen</button>';
   }
   if (adviceError?.key === key) {
     return `<p class="muted">${esc(adviceError.msg)}</p><button class="secondary" data-refresh="1">Erneut versuchen</button>`;
@@ -155,6 +255,7 @@ async function loadAdvice() {
   refreshAdviceView();
   try {
     const data = await gemini([{ text: advicePrompt(ctx) }], ADVICE_SCHEMA, apiKey);
+    portions = {};
     save(LS.advice, { key: ctx.key, data });
   } catch (e) {
     adviceError = { key: ctx.key, msg: 'Empfehlung fehlgeschlagen: ' + e.message };
@@ -163,6 +264,68 @@ async function loadAdvice() {
     refreshAdviceView();
   }
 }
+
+async function swapAdviceMeal(i) {
+  const apiKey = localStorage.getItem(LS.key);
+  const cache = load(LS.advice, null);
+  if (!apiKey || !cache || adviceBusy) return;
+  const data = cache.data;
+  const old = data.meals[i];
+  adviceBusy = true;
+  adviceError = null;
+  refreshAdviceView();
+  try {
+    const titles = data.meals.map(m => m.title).join('; ');
+    const prefs = load(LS.prefs, DEFAULT_PREFS);
+    const prompt = `Ersetze eine Mahlzeit im Essensplan für heute. Slot: ${slotOf(old)}. Uhrzeit: ${old.time}. Das bisherige Gericht "${old.title}" gefällt nicht. Schlage ein anderes Gericht vor, das nicht in dieser Liste steht: ${titles}.
+Tagesablauf: ${routineText()}
+Wünsche und Vorlieben der Person: ${prefs || 'keine angegeben'}.
+${RECIPE_RULES}
+Antworte auf Deutsch und ausschließlich als JSON nach dem vorgegebenen Schema.`;
+    const meal = await gemini([{ text: prompt }], MEAL_ITEM, apiKey);
+    data.meals[i] = { ...meal, slot: old.slot, time: meal.time || old.time };
+
+    const lines = data.meals.flatMap(m => [...(m.ingredients || []), ...(m.vegetarian?.ingredients || [])]);
+    const shop = await gemini([{ text: `Erstelle aus diesen Zutaten eine zusammengefasste Einkaufsliste für 1 Person. Gleiche Zutaten zusammenfassen, Mengen addieren, eine Zeile pro Eintrag mit Menge, z. B. "500 g Hähnchenbrust". Zutaten: ${lines.join('; ')}. Antworte als JSON nach dem Schema.` }], SHOP_SCHEMA, apiKey);
+    data.shoppingList = shop.shoppingList || data.shoppingList;
+
+    delete portions[`m${i}`];
+    delete portions[`v${i}`];
+    save(LS.advice, { key: cache.key, data });
+  } catch (e) {
+    adviceError = { key: cache.key, msg: 'Ersetzen fehlgeschlagen: ' + e.message };
+  } finally {
+    adviceBusy = false;
+    refreshAdviceView();
+  }
+}
+
+/* ---------- Tagesablauf & Prompts ---------- */
+function dayRoutine(wd) {
+  const workday = wd >= 1 && wd <= 5;
+  const training = wd === 2 || wd === 4;
+  if (workday) {
+    return [
+      'Arbeitstag: Aufstehen um 7:00, ab 7:30 in der Firma, Mittagessen um 12:00 in der Firma. Ein schnelles Frühstück zu Hause vor der Arbeit (ca. 6:45 bis 7:15) ist sinnvoll, damit die Person nicht bis zur Mittagspause ohne Essen bleibt. Das Mittagessen soll sich gut mitnehmen lassen.',
+      training
+        ? 'Fußball-Training an diesem Tag: Die Person verlässt um 19:00 das Haus. Plane einen kleinen, leichten Snack um 17:30 bis 18:00 (mit Kohlenhydraten) und das Abendessen nach dem Training ab ca. 20:30.'
+        : 'Kein Training an diesem Tag: Abendessen gegen 19:00. Ein kleiner Snack am Nachmittag ist optional.'
+    ].join('\n');
+  }
+  return 'Wochenende: flexible Zeiten. Frühstück ca. 9:00, Mittagessen ca. 13:00, Abendessen ca. 19:00.';
+}
+
+function routineText() {
+  const wd = new Date().getDay();
+  const now = new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+  return `Heute ist ${WEEKDAYS[wd]}. Es ist jetzt ${now} Uhr. Plane nur Zeiten, die noch nicht vorbei sind.\n${dayRoutine(wd)}`;
+}
+
+const RECIPE_RULES = `Regeln für Rezepte:
+- Einfach und schnell: höchstens etwa 20 Minuten aktive Zeit, wenige Zutaten, Alltagsküche, keine aufwendigen Techniken. prepMinutes ist die Gesamtzeit in Minuten.
+- Rezepte für 1 Person (servings: 1).
+- Jede Zutat beginnt mit einer Menge in Zahlen, z. B. "150 g Haferflocken" oder "2 Eier", damit die Mengen umgerechnet werden können.
+- Jede Mahlzeit bekommt zusätzlich eine vegetarische Alternative (vegetarian) mit eigenem Rezept und Nährwerten. Ist die Hauptmahlzeit schon vegetarisch, gib eine andere vegetarische Variante an.`;
 
 function advicePrompt({ meals, targets, custom, prefs }) {
   const items = meals.flatMap(m => m.items);
@@ -176,55 +339,188 @@ function advicePrompt({ meals, targets, custom, prefs }) {
     : 'noch nichts';
   const task = meals.length
     ? 'Schlage 1 bis 3 Mahlzeiten oder Snacks vor, die den offenen Bedarf sinnvoll decken und zum bereits Gegessenen passen. Wenn das Tagesziel schon überschritten ist, schlage nur leichte Optionen vor und sag das offen.'
-    : 'Erstelle einen Essensplan für den ganzen Tag mit Frühstück, Mittagessen, Abendessen und einem Snack, der die Tagesziele möglichst genau trifft.';
+    : 'Erstelle einen Essensplan für den ganzen Tag mit Frühstück, Mittagessen, Abendessen und einem Snack, der die Tagesziele möglichst genau trifft und zum Tagesablauf passt.';
 
   return `Du bist ein Ernährungsassistent für eine Privatperson. Du gibst keine medizinische Beratung; bei gesundheitlichen Fragen verweist du auf Ärztinnen und Ärzte. Alle Nährwerte sind Schätzungen.
+${routineText()}
 Tagesziele${custom ? '' : ' (Richtwerte, da keine eigenen Ziele hinterlegt sind)'}: ${targets.kcal} kcal, ${targets.protein} g Eiweiß, ${targets.carbs} g Kohlenhydrate, ${targets.fat} g Fett.
 Bereits heute gegessen: ${foodList}.
 Noch offen: ${open.kcal} kcal, ${open.protein} g Eiweiß, ${open.carbs} g Kohlenhydrate, ${open.fat} g Fett.
 Wünsche und Vorlieben der Person: ${prefs || 'keine angegeben'}.
 Aufgabe: ${task}
-Antworte auf Deutsch und ausschließlich als JSON nach dem vorgegebenen Schema. Jede Mahlzeit bekommt eine Zuordnung (slot: Frühstück, Mittagessen, Abendessen oder Snack), eine Uhrzeit, einen kurzen Titel, eine kurze Beschreibung und die geschätzten Nährwerte.
-Zusätzlich erstellst du eine Einkaufsliste (shoppingList) mit allen Zutaten der vorgeschlagenen Mahlzeiten. Gleiche Zutaten fasst du zusammen. Jeder Eintrag steht in einer eigenen Zeile mit Menge und Zutat, z. B. "500 g Hähnchenbrust" oder "1 Bund Blattspinat". Die Vorräte der Person sind unbekannt, also listest du alles auf, außer Dinge, die bereits gegessen wurden.`;
+
+${RECIPE_RULES}
+- Jede Mahlzeit bekommt eine Zuordnung (slot: Frühstück, Mittagessen, Abendessen oder Snack), eine Uhrzeit, einen kurzen Titel und eine kurze Beschreibung.
+- Die Einkaufsliste (shoppingList) gilt für 1 Person und enthält die Zutaten aller Hauptmahlzeiten und vegetarischen Alternativen. Gleiche Zutaten fasst du zusammen. Jeder Eintrag steht in einer eigenen Zeile mit Menge, z. B. "500 g Hähnchenbrust". Die Vorräte sind unbekannt, also listest du alles auf, außer Dingen, die bereits gegessen wurden.
+Antworte auf Deutsch und ausschließlich als JSON nach dem vorgegebenen Schema.`;
 }
 
-const SLOTS = ['Frühstück', 'Mittagessen', 'Abendessen', 'Snack'];
+function weekPrompt(targets, prefs) {
+  const dayLines = WEEK_ORDER.map((name, k) => `${name}: ${dayRoutine(WEEK_GETDAY[k]).replace(/\n/g, ' ')}`).join('\n');
+  return `Du bist ein Ernährungsassistent für eine Privatperson. Du gibst keine medizinische Beratung. Alle Nährwerte sind Schätzungen.
+Erstelle einen Wochenplan für 7 Tage, Montag bis Sonntag, in genau dieser Reihenfolge (days[0] ist Montag, days[6] ist Sonntag).
+Tagesabläufe:
+${dayLines}
+Tagesziele (Richtwerte pro Tag): ${targets.kcal} kcal, ${targets.protein} g Eiweiß, ${targets.carbs} g Kohlenhydrate, ${targets.fat} g Fett.
+Wünsche und Vorlieben der Person: ${prefs || 'keine angegeben'}.
+
+${RECIPE_RULES}
+- Pro Tag Frühstück, Mittagessen und Abendessen. Einen Snack nur dort, wo der Tagesablauf es nahelegt.
+- Abwechslung: Kein Gericht mehr als einmal in der Woche.
+- Zeitsparen: Plane Mittagessen so, dass sie für mehrere Tage vorbereitet werden können.
+- Jede Mahlzeit bekommt eine Zuordnung (slot), eine Uhrzeit, einen kurzen Titel und eine kurze Beschreibung.
+- Die Einkaufsliste (shoppingList) gilt für 1 Person und fasst die Zutaten der ganzen Woche zusammen (Hauptmahlzeiten und vegetarische Alternativen). Gleiche Zutaten zusammenfassen, Mengen addieren, eine Zeile pro Eintrag mit Menge.
+Antworte auf Deutsch und ausschließlich als JSON nach dem vorgegebenen Schema.`;
+}
+
+/* ---------- Anzeige Empfehlungen (Heute) ---------- */
+const slotOf = (m) => (SLOTS.includes(m.slot) ? m.slot : 'Snack');
+
+function mealCard(m, i) {
+  const base = m.servings || 1;
+  return `
+    <div class="card">
+      <div class="grow">
+        <strong>${esc(m.time)} · ${esc(m.title)}</strong>
+        <div class="muted">${esc(m.description)}</div>
+        ${m.prepMinutes ? `<div class="muted">⏱ ca. ${Math.round(m.prepMinutes)} Min.</div>` : ''}
+        ${recipeBlock(m, `m${i}`, base, 'Rezept anzeigen')}
+        ${m.vegetarian ? recipeBlock(m.vegetarian, `v${i}`, base, `Vegetarisch: ${esc(m.vegetarian.title)}`) : ''}
+        <button class="secondary" data-aswap="${i}" ${adviceBusy ? 'disabled' : ''} style="margin-top:8px">Anderes Rezept</button>
+      </div>
+    </div>`;
+}
 
 function renderAdvice(d) {
   const meals = d.meals || [];
-  const slotOf = (m) => (SLOTS.includes(m.slot) ? m.slot : 'Snack');
   const groups = SLOTS.map(slot => {
-    const list = meals.filter(m => slotOf(m) === slot);
+    const list = meals.map((m, i) => ({ m, i })).filter(({ m }) => slotOf(m) === slot);
     if (!list.length) return '';
-    return `<h3 class="slot">${slot}</h3>` + list.map(m => `
-      <div class="card">
-        <div class="grow">
-          <strong>${esc(m.time)} · ${esc(m.title)}</strong>
-          <div class="muted">${esc(m.description)}</div>
-          <div class="muted">${Math.round(m.kcal || 0)} kcal · E ${round(m.protein || 0)} g · KH ${round(m.carbs || 0)} g · F ${round(m.fat || 0)} g</div>
-        </div>
-      </div>`).join('');
+    return `<h3 class="slot">${slot}</h3>` + list.map(({ m, i }) => mealCard(m, i)).join('');
   }).join('');
-
-  const shop = (d.shoppingList || []).filter(Boolean);
-  const shopBox = shop.length ? `
-    <h2>Einkaufsliste</h2>
-    <ul class="shop">${shop.map(i => `<li>${esc(i)}</li>`).join('')}</ul>
-    <button id="copyShop">In die Zwischenablage kopieren</button>
-    ${navigator.share ? '<button id="shareShop" class="secondary">Teilen</button>' : ''}
-    <p class="muted">Dann in Bring! einfügen: Die Einträge stehen je in einer eigenen Zeile.</p>` : '';
 
   return `
     <p>${esc(d.summary)}</p>
     ${groups}
-    ${shopBox}
+    ${shopBox(d.shoppingList)}
     ${d.tips?.length ? `<h2>Tipps</h2><ul>${d.tips.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : ''}
     <p class="muted">Schätzungen, keine medizinische Beratung.</p>`;
 }
 
-function shopText() {
-  const d = load(LS.advice, null)?.data;
-  return (d?.shoppingList || []).filter(Boolean).join('\n');
+/* ---------- Wochenplan ---------- */
+function currentWeekKey() {
+  const now = new Date();
+  const offset = (now.getDay() + 6) % 7;
+  const mon = new Date(now);
+  mon.setDate(now.getDate() - offset);
+  return mon.toLocaleDateString('sv-SE');
+}
+
+function dateLabel(weekKey, k) {
+  const d = new Date(weekKey + 'T00:00');
+  d.setDate(d.getDate() + k);
+  return d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
+}
+
+function viewWeek() {
+  const week = load(LS.week, null);
+  const current = week?.weekKey === currentWeekKey() ? week : null;
+  let body;
+  if (!localStorage.getItem(LS.key)) {
+    body = '<p class="muted">Für den Wochenplan den Gemini-Schlüssel unter Einstellungen eintragen.</p>';
+  } else if (weekBusy) {
+    body = `<p class="muted">${esc(weekStatus)}</p>`;
+  } else if (!current) {
+    body = `${weekError ? `<p class="muted">${esc(weekError)}</p>` : ''}
+      <p class="muted">Noch kein Wochenplan für diese Woche.</p>
+      <button id="createWeek">Wochenplan erstellen</button>`;
+  } else {
+    body = weekDays(current) + shopBox(current.shoppingList) +
+      (weekError ? `<p class="muted">${esc(weekError)}</p>` : '') +
+      `<button class="secondary" id="createWeek">Neuen Wochenplan erstellen</button>`;
+  }
+  $('#app').innerHTML = `
+    <h1>Wochenplan</h1>
+    <p class="muted">Geplant für 1 Person. Die Einkaufsliste lässt sich auf 1 oder 2 Personen umstellen.</p>
+    ${body}`;
+}
+
+function weekDays(week) {
+  return week.days.map((day, d) => {
+    const meals = (day.meals || [])
+      .map((m, i) => ({ m, i }))
+      .sort((a, b) => SLOTS.indexOf(a.m.slot) - SLOTS.indexOf(b.m.slot));
+    return `
+      <h2>${day.name} <span class="muted">${dateLabel(week.weekKey, d)}</span></h2>
+      ${meals.length ? meals.map(({ m, i }) => weekMealCard(m, d, i)).join('') : '<p class="muted">Kein Plan für diesen Tag.</p>'}`;
+  }).join('');
+}
+
+function weekMealCard(m, d, i) {
+  return `
+    <div class="card">
+      <div class="grow">
+        <div class="muted">${esc(m.slot)} · ${esc(m.time)}</div>
+        <strong>${esc(m.title)}</strong>
+        <div class="muted">${esc(m.description)}</div>
+        ${m.prepMinutes ? `<div class="muted">⏱ ca. ${Math.round(m.prepMinutes)} Min.</div>` : ''}
+        ${plainRecipe(m, `w${d}-${i}`, 'Rezept anzeigen')}
+        ${m.vegetarian ? plainRecipe(m.vegetarian, `w${d}-${i}-v`, `Vegetarisch: ${esc(m.vegetarian.title)}`) : ''}
+        <button class="secondary" data-swap="${d}-${i}" ${weekBusy ? 'disabled' : ''} style="margin-top:8px">Anderes Rezept</button>
+      </div>
+    </div>`;
+}
+
+async function createWeek() {
+  const apiKey = localStorage.getItem(LS.key);
+  if (!apiKey || weekBusy) return;
+  weekBusy = true;
+  weekError = '';
+  weekStatus = 'Wochenplan wird erstellt. Das dauert etwa eine Minute …';
+  render();
+  try {
+    const { targets } = currentTargets();
+    const res = await gemini([{ text: weekPrompt(targets, load(LS.prefs, DEFAULT_PREFS)) }], WEEK_SCHEMA, apiKey);
+    const days = WEEK_ORDER.map((name, k) => ({ name, meals: res.days?.[k]?.meals || [] }));
+    save(LS.week, { weekKey: currentWeekKey(), days, shoppingList: res.shoppingList || [] });
+  } catch (e) {
+    weekError = 'Wochenplan fehlgeschlagen: ' + e.message;
+  } finally {
+    weekBusy = false;
+    weekStatus = '';
+    render();
+  }
+}
+
+async function swapMeal(d, i) {
+  const apiKey = localStorage.getItem(LS.key);
+  const week = load(LS.week, null);
+  if (!apiKey || !week || weekBusy) return;
+  const old = week.days[d].meals[i];
+  weekBusy = true;
+  weekError = '';
+  weekStatus = 'Rezept wird ersetzt …';
+  render();
+  try {
+    const titles = week.days.flatMap(x => x.meals.map(m => m.title)).join('; ');
+    const prompt = `Ersetze in einem Wochenplan eine Mahlzeit. Tag: ${week.days[d].name}. Slot: ${old.slot}. Uhrzeit: ${old.time}. Das bisherige Gericht "${old.title}" gefällt nicht. Schlage ein anderes Gericht vor, das nicht in dieser Liste steht: ${titles}.
+${RECIPE_RULES}
+Wünsche und Vorlieben der Person: ${load(LS.prefs, DEFAULT_PREFS)}.
+Antworte auf Deutsch und ausschließlich als JSON nach dem vorgegebenen Schema.`;
+    const meal = await gemini([{ text: prompt }], MEAL_ITEM, apiKey);
+    week.days[d].meals[i] = { ...meal, slot: old.slot, time: meal.time || old.time };
+
+    const lines = week.days.flatMap(x => x.meals.flatMap(m => [...(m.ingredients || []), ...(m.vegetarian?.ingredients || [])]));
+    const shop = await gemini([{ text: `Erstelle aus diesen Zutaten einer Wochenplanung eine zusammengefasste Einkaufsliste für 1 Person. Gleiche Zutaten zusammenfassen, Mengen addieren, eine Zeile pro Eintrag mit Menge, z. B. "500 g Hähnchenbrust". Zutaten: ${lines.join('; ')}. Antworte als JSON nach dem Schema.` }], SHOP_SCHEMA, apiKey);
+    week.shoppingList = shop.shoppingList || week.shoppingList;
+    save(LS.week, week);
+  } catch (e) {
+    weekError = 'Ersetzen fehlgeschlagen: ' + e.message;
+  } finally {
+    weekBusy = false;
+    weekStatus = '';
+    render();
+  }
 }
 
 /* ---------- Neue Mahlzeit ---------- */
@@ -373,7 +669,7 @@ function viewSettings() {
     alert('Ziele gespeichert.');
   };
   $('#exp').onclick = () => {
-    const blob = new Blob([JSON.stringify({ meals: load(LS.meals, []), goals: load(LS.goals, {}), prefs: load(LS.prefs, DEFAULT_PREFS) }, null, 2)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify({ meals: load(LS.meals, []), goals: load(LS.goals, {}), prefs: load(LS.prefs, DEFAULT_PREFS), week: load(LS.week, null) }, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = 'ernaehrung-backup.json';
@@ -389,6 +685,7 @@ function viewSettings() {
       save(LS.meals, [...current, ...(data.meals || []).filter(m => !ids.has(m.id))]);
       if (data.goals) save(LS.goals, data.goals);
       if (data.prefs) save(LS.prefs, data.prefs);
+      if (data.week) save(LS.week, data.week);
       alert('Backup importiert.');
     } catch {
       alert('Die Datei konnte nicht gelesen werden.');
@@ -407,8 +704,18 @@ document.addEventListener('click', async (e) => {
     draft.items.splice(+t.dataset.rm, 1);
     render();
   }
+  if (t.dataset?.port) {
+    const id = t.dataset.port;
+    const base = +t.dataset.base;
+    portions[id] = Math.max(1, (portions[id] ?? base) + +t.dataset.d);
+    refreshAdviceView();
+  }
+  if (t.dataset?.shop) {
+    save(LS.shopPersons, Math.max(1, shopPersons() + +t.dataset.shop));
+    render();
+  }
   if (t.id === 'copyShop') {
-    const text = shopText();
+    const text = Array.from(document.querySelectorAll('ul.shop li')).map(li => li.textContent).join('\n');
     try {
       await navigator.clipboard.writeText(text);
       t.textContent = 'Kopiert ✓';
@@ -417,14 +724,30 @@ document.addEventListener('click', async (e) => {
     }
   }
   if (t.id === 'shareShop') {
-    navigator.share({ title: 'Einkaufsliste', text: shopText() }).catch(() => {});
+    const text = Array.from(document.querySelectorAll('ul.shop li')).map(li => li.textContent).join('\n');
+    navigator.share({ title: 'Einkaufsliste', text }).catch(() => {});
   }
   if (t.dataset?.refresh) {
     save(LS.advice, null);
     adviceError = null;
     refreshAdviceView();
   }
+  if (t.dataset?.aswap !== undefined) swapAdviceMeal(+t.dataset.aswap);
+  if (t.id === 'createWeek') createWeek();
+  if (t.dataset?.swap) {
+    const [d, i] = t.dataset.swap.split('-').map(Number);
+    swapMeal(d, i);
+  }
 });
+
+// Offene Rezepte merken, damit sie beim Neuzeichnen offen bleiben
+document.addEventListener('toggle', (e) => {
+  const d = e.target;
+  if (d.dataset?.rid) {
+    if (d.open) openRecipes.add(d.dataset.rid);
+    else openRecipes.delete(d.dataset.rid);
+  }
+}, true);
 
 document.addEventListener('input', (e) => {
   const t = e.target;
