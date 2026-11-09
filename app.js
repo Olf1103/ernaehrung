@@ -521,10 +521,10 @@ ${RECIPE_RULES}
 Antworte auf Deutsch und ausschließlich als JSON nach dem vorgegebenen Schema.`;
 }
 
-function weekPrompt(targets, prefs) {
-  const dayLines = WEEK_ORDER.map((name, k) => `${name}: ${dayRoutine(WEEK_GETDAY[k]).replace(/\n/g, ' ')}`).join('\n');
+function weekPrompt(targets, prefs, indexes) {
+  const dayLines = indexes.map(k => `${WEEK_ORDER[k]}: ${dayRoutine(WEEK_GETDAY[k]).replace(/\n/g, ' ')}`).join('\n');
   return `Du bist ein Ernährungsassistent für eine Privatperson. Du gibst keine medizinische Beratung. Alle Nährwerte sind Schätzungen.
-Erstelle einen Wochenplan für 7 Tage, Montag bis Sonntag, in genau dieser Reihenfolge (days[0] ist Montag, days[6] ist Sonntag).
+Erstelle einen Wochenplan für ${indexes.length} Tage in genau dieser Reihenfolge: ${indexes.map(k => WEEK_ORDER[k]).join(', ')}. days[0] ist ${WEEK_ORDER[indexes[0]]}.
 Tagesabläufe:
 ${dayLines}
 Tagesziele (Richtwerte pro Tag): ${targets.kcal} kcal, ${targets.protein} g Eiweiß, ${targets.carbs} g Kohlenhydrate, ${targets.fat} g Fett.
@@ -608,7 +608,7 @@ function viewWeek() {
   if (!localStorage.getItem(LS.key)) {
     body = '<p class="muted">Für den Wochenplan den Gemini-Schlüssel unter Einstellungen eintragen.</p>';
   } else if (weekBusy) {
-    body = `<p class="muted">${esc(weekStatus)}</p>`;
+    body = progress ? progressBox() : `<p class="muted">${esc(weekStatus)}</p>`;
   } else if (!current) {
     body = `${weekError ? `<p class="muted">${esc(weekError)}</p>` : ''}
       <p class="muted">Noch kein Wochenplan für diese Woche.</p>
@@ -661,23 +661,73 @@ function weekMealCard(m, d, i) {
     </div>`;
 }
 
+/* Fortschrittsanzeige für den Wochenplan */
+let progress = null;      // { pct, label, start }
+let progressTimer = null;
+
+function progressInner() {
+  if (!progress) return '';
+  const sec = Math.round((Date.now() - progress.start) / 1000);
+  return `<div style="background:#1e293b;border-radius:8px;height:12px;overflow:hidden">
+      <div style="height:100%;width:${progress.pct}%;background:#34d399;transition:width .5s"></div>
+    </div>
+    <p class="muted">${esc(progress.label)} · ${sec} s vergangen</p>`;
+}
+
+function progressBox() {
+  return `<div id="progressBox" style="margin:12px 0">${progressInner()}</div>`;
+}
+
+function updateProgress() {
+  const el = $('#progressBox');
+  if (el) el.innerHTML = progressInner();
+}
+
+function setProgress(pct, label) {
+  if (!progress) return;
+  progress.pct = pct;
+  progress.label = label;
+  updateProgress();
+}
+
+function startProgress(label) {
+  progress = { pct: 5, label, start: Date.now() };
+  clearInterval(progressTimer);
+  progressTimer = setInterval(updateProgress, 1000); // Zeit läuft sichtbar weiter
+}
+
+function stopProgress() {
+  clearInterval(progressTimer);
+  progressTimer = null;
+  progress = null;
+}
+
+async function weekPart(targets, prefs, idx, apiKey) {
+  const res = await gemini([{ text: weekPrompt(targets, prefs, idx) }], WEEK_SCHEMA, apiKey);
+  return idx.map((k, j) => ({ name: WEEK_ORDER[k], meals: res.days?.[j]?.meals || [] }));
+}
+
 async function createWeek() {
   const apiKey = localStorage.getItem(LS.key);
   if (!apiKey || weekBusy) return;
   weekBusy = true;
   weekError = '';
-  weekStatus = 'Wochenplan wird erstellt. Das dauert etwa eine Minute …';
+  startProgress('Wochenplan wird gestartet …');
   render();
   try {
     const { targets } = currentTargets();
-    const res = await gemini([{ text: weekPrompt(targets, load(LS.prefs, DEFAULT_PREFS)) }], WEEK_SCHEMA, apiKey);
-    const days = WEEK_ORDER.map((name, k) => ({ name, meals: res.days?.[k]?.meals || [] }));
-    save(LS.week, { weekKey: currentWeekKey(), days, shoppingList: res.shoppingList || [] });
+    const prefs = load(LS.prefs, DEFAULT_PREFS);
+    setProgress(10, 'Teil 1 von 2: Montag bis Donnerstag wird geplant …');
+    const first = await weekPart(targets, prefs, [0, 1, 2, 3], apiKey);
+    setProgress(55, 'Teil 2 von 2: Freitag bis Sonntag wird geplant …');
+    const second = await weekPart(targets, prefs, [4, 5, 6], apiKey);
+    setProgress(95, 'Plan wird gespeichert …');
+    save(LS.week, { weekKey: currentWeekKey(), days: [...first, ...second], shoppingList: [] });
   } catch (e) {
     weekError = 'Wochenplan fehlgeschlagen: ' + e.message;
   } finally {
     weekBusy = false;
-    weekStatus = '';
+    stopProgress();
     render();
   }
 }
