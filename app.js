@@ -358,7 +358,19 @@ function viewOverview() {
   `;
 }
 
+// Gerichte für heute aus dem Wochenplan, solange heute noch nichts gegessen wurde
+function weekMealsToday() {
+  const week = load(LS.week, null);
+  if (week?.weekKey !== currentWeekKey()) return null;
+  const meals = week.days?.[(new Date().getDay() + 6) % 7]?.meals || [];
+  return meals.length ? meals : null;
+}
+
 function adviceBox() {
+  if (!todaysMeals().length) {
+    const wm = weekMealsToday();
+    if (wm) return renderAdvice({ summary: 'Heute aus dem Wochenplan. Mit „Anderes Rezept“ ersetzt du ein Gericht, auch im Wochenplan.', meals: wm, shoppingList: [], tips: [] });
+  }
   if (!localStorage.getItem(LS.key)) {
     return '<p class="muted">Für Empfehlungen den Gemini-Schlüssel unter Einstellungen eintragen.</p>';
   }
@@ -405,6 +417,7 @@ async function loadAdvice() {
 }
 
 async function swapAdviceMeal(i) {
+  if (!todaysMeals().length && weekMealsToday()) return swapMeal((new Date().getDay() + 6) % 7, i);
   const apiKey = localStorage.getItem(LS.key);
   const cache = load(LS.advice, null);
   if (!apiKey || !cache || adviceBusy) return;
@@ -553,7 +566,7 @@ function renderAdvice(d) {
     <p class="muted">${esc(d.summary)}</p>
     ${main}
     ${later.length ? `<h3 class="slot">Danach heute</h3><ul>${later.map(({ m }) => `<li>${esc(m.time)} · ${esc(m.slot)}: ${esc(m.title)}</li>`).join('')}</ul>` : ''}
-    <details style="margin-top:12px"><summary>Einkaufsliste für heute</summary>${shopBox(d.shoppingList)}</details>
+    ${d.shoppingList?.length ? `<details style="margin-top:12px"><summary>Einkaufsliste für heute</summary>${shopBox(d.shoppingList)}</details>` : ''}
     ${d.tips?.length ? `<details style="margin-top:12px"><summary>Tipps</summary><ul>${d.tips.map(t => `<li>${esc(t)}</li>`).join('')}</ul></details>` : ''}
     <p class="muted">Schätzungen, keine medizinische Beratung.</p>`;
 }
