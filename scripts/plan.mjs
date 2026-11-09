@@ -133,12 +133,23 @@ async function gemini(text, schema) {
     generationConfig: { responseMimeType: 'application/json', responseSchema: schema }
   };
   for (let attempt = 1; ; attempt++) {
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GKEY },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(240000)
-    });
+    let res;
+    try {
+      res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GKEY },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(150000)
+      });
+    } catch (e) {
+      // Zeitüberschreitung oder Verbindungsfehler: erneut versuchen
+      if (attempt < 3) {
+        console.log(`Versuch ${attempt} ist fehlgeschlagen (${e.message}), neuer Versuch …`);
+        await new Promise(r => setTimeout(r, 5000 * attempt));
+        continue;
+      }
+      throw e;
+    }
     if ((res.status === 503 || res.status === 429) && attempt < 4) {
       await new Promise(r => setTimeout(r, 5000 * attempt));
       continue;
