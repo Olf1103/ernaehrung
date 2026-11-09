@@ -1,6 +1,6 @@
 const MODEL = 'gemini-3.8-flash';
 const LS = { meals: 'ern.meals', key: 'ern.geminiKey', goals: 'ern.goals', prefs: 'ern.prefs', advice: 'ern.advice', week: 'ern.week', shopPersons: 'ern.shopPersons', sync: 'ern.sync', localUpdated: 'ern.localUpdated' };
-const SYNC_KEYS = [LS.meals, LS.goals, LS.prefs, LS.week, LS.shopPersons];
+const SYNC_KEYS = [LS.meals, LS.goals, LS.prefs, LS.week, LS.shopPersons, LS.advice];
 const DEFAULT_PREFS = 'Spielt privat Fußball. Möchte zu Hause etwas Sport machen.';
 const DEFAULT_TARGETS = { kcal: 2200, protein: 120, carbs: 250, fat: 70 };
 const WEEKDAYS = ['Sonntag', 'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag'];
@@ -120,7 +120,8 @@ function syncPayload() {
     meals: load(LS.meals, []).map(m => ({ ...m, thumb: null })),
     goals: load(LS.goals, {}),
     prefs: load(LS.prefs, DEFAULT_PREFS),
-    shopPersons: load(LS.shopPersons, 2)
+    shopPersons: load(LS.shopPersons, 2),
+    advice: load(LS.advice, null)
   };
 }
 
@@ -169,6 +170,7 @@ async function syncPull() {
     localStorage.setItem(LS.goals, JSON.stringify(p.goals || {}));
     localStorage.setItem(LS.prefs, JSON.stringify(p.prefs ?? DEFAULT_PREFS));
     localStorage.setItem(LS.shopPersons, JSON.stringify(p.shopPersons ?? 2));
+    localStorage.setItem(LS.advice, JSON.stringify(p.advice ?? null));
     localStorage.setItem(LS.localUpdated, JSON.stringify(remoteUpdated));
     setSyncStatus('Aktualisiert');
     return true;
