@@ -251,6 +251,18 @@ function mergeShopping(list) {
   });
 }
 
+// Einkaufsliste nur aus den ausgewählten Gerichten (Hauptgericht, vegetarisch oder keins)
+function shoppingFromMeals(meals) {
+  const list = [];
+  for (const m of meals || []) {
+    const use = m.use ?? 'main';
+    if (use === 'none') continue;
+    const src = use === 'veg' && m.vegetarian ? m.vegetarian : m;
+    list.push(...(src.ingredients || []));
+  }
+  return mergeShopping(list);
+}
+
 function shopBox(list) {
   const items = mergeShopping(list);
   if (!items.length) return '';
@@ -566,7 +578,7 @@ function renderAdvice(d) {
     <p class="muted">${esc(d.summary)}</p>
     ${main}
     ${later.length ? `<h3 class="slot">Danach heute</h3><ul>${later.map(({ m }) => `<li>${esc(m.time)} · ${esc(m.slot)}: ${esc(m.title)}</li>`).join('')}</ul>` : ''}
-    ${d.shoppingList?.length ? `<details style="margin-top:12px"><summary>Einkaufsliste für heute</summary>${shopBox(d.shoppingList)}</details>` : ''}
+    ${shoppingFromMeals(meals).length ? `<details style="margin-top:12px"><summary>Einkaufsliste für heute</summary>${shopBox(shoppingFromMeals(meals))}</details>` : ''}
     ${d.tips?.length ? `<details style="margin-top:12px"><summary>Tipps</summary><ul>${d.tips.map(t => `<li>${esc(t)}</li>`).join('')}</ul></details>` : ''}
     <p class="muted">Schätzungen, keine medizinische Beratung.</p>`;
 }
@@ -599,7 +611,7 @@ function viewWeek() {
       <p class="muted">Noch kein Wochenplan für diese Woche.</p>
       <button id="createWeek">Wochenplan erstellen</button>`;
   } else {
-    body = weekDays(current) + '<details style="margin-top:12px"><summary>Einkaufsliste der ganzen Woche</summary>' + shopBox(current.shoppingList) + '</details>' +
+    body = weekDays(current) + '<details style="margin-top:12px"><summary>Einkaufsliste der ganzen Woche</summary>' + shopBox(shoppingFromMeals(current.days.flatMap(d => d.meals || []))) + '</details>' +
       (weekError ? `<p class="muted">${esc(weekError)}</p>` : '') +
       `<button class="secondary" id="createWeek">Neuen Wochenplan erstellen</button>`;
   }
@@ -624,6 +636,7 @@ function weekDays(week) {
 }
 
 function weekMealCard(m, d, i) {
+  const use = m.use ?? 'main';
   return `
     <div class="card">
       <div class="grow">
@@ -633,6 +646,13 @@ function weekMealCard(m, d, i) {
         ${m.prepMinutes ? `<div class="muted">⏱ ca. ${Math.round(m.prepMinutes)} Min.</div>` : ''}
         ${plainRecipe(m, `w${d}-${i}`, 'Rezept anzeigen')}
         ${m.vegetarian ? plainRecipe(m.vegetarian, `w${d}-${i}-v`, `Vegetarisch: ${esc(m.vegetarian.title)}`) : ''}
+        <label class="muted" style="display:block;margin-top:8px">Einkaufen für
+          <select data-use="${d}-${i}" style="margin-left:6px">
+            <option value="main" ${use === 'main' ? 'selected' : ''}>Hauptgericht</option>
+            <option value="veg" ${use === 'veg' ? 'selected' : ''} ${m.vegetarian ? '' : 'disabled'}>Vegetarisch</option>
+            <option value="none" ${use === 'none' ? 'selected' : ''}>nicht einkaufen</option>
+          </select>
+        </label>
         <button class="secondary" data-swap="${d}-${i}" ${weekBusy ? 'disabled' : ''} style="margin-top:8px">Anderes Rezept</button>
       </div>
     </div>`;
@@ -675,7 +695,7 @@ ${RECIPE_RULES}
 Wünsche und Vorlieben der Person: ${load(LS.prefs, DEFAULT_PREFS)}.
 Antworte auf Deutsch und ausschließlich als JSON nach dem vorgegebenen Schema.`;
     const meal = await gemini([{ text: prompt }], MEAL_ITEM, apiKey);
-    week.days[d].meals[i] = { ...meal, slot: old.slot, time: meal.time || old.time };
+    week.days[d].meals[i] = { ...meal, slot: old.slot, time: meal.time || old.time, use: old.use ?? 'main' };
 
     const lines = week.days.flatMap(x => x.meals.flatMap(m => [...(m.ingredients || []), ...(m.vegetarian?.ingredients || [])]));
     const shop = await gemini([{ text: `Erstelle aus diesen Zutaten einer Wochenplanung eine zusammengefasste Einkaufsliste für 1 Person. Gleiche Zutaten zusammenfassen, Mengen addieren, eine Zeile pro Eintrag mit Menge, z. B. "500 g Hähnchenbrust". Zutaten: ${lines.join('; ')}. Antworte als JSON nach dem Schema.` }], SHOP_SCHEMA, apiKey);
@@ -939,6 +959,18 @@ document.addEventListener('toggle', (e) => {
     else openRecipes.delete(d.dataset.rid);
   }
 }, true);
+
+document.addEventListener('change', (e) => {
+  const t = e.target;
+  if (t.dataset?.use) {
+    const [d, i] = t.dataset.use.split('-').map(Number);
+    const week = load(LS.week, null);
+    if (!week?.days?.[d]?.meals?.[i]) return;
+    week.days[d].meals[i].use = t.value;
+    save(LS.week, week);
+    render();
+  }
+});
 
 document.addEventListener('input', (e) => {
   const t = e.target;
