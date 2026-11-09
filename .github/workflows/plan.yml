@@ -1,0 +1,25 @@
+name: Tagesplan
+
+on:
+  schedule:
+    # 04:00 und 05:00 UTC. Das Skript prüft die Berliner Uhrzeit und läuft nur um 6 Uhr.
+    - cron: '0 4 * * *'
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Plan erstellen und speichern
+        run: node scripts/plan.mjs
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+          FIREBASE_WEB_API_KEY: ${{ secrets.FIREBASE_WEB_API_KEY }}
+          SYNC_CODE: ${{ secrets.SYNC_CODE }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' }}
